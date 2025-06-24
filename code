@@ -1,0 +1,360 @@
+from flask import Flask, Response, render_template_string
+from picamera2 import Picamera2
+import RPi.GPIO as GPIO
+import time
+import cv2
+import numpy as np
+
+GPIO.setmode(GPIO.BCM)
+
+# Define GPIO pins for motors
+Motor1A = 15
+Motor1B = 20
+Motor2A = 6
+Motor2B = 19
+
+# Define GPIO pins for ultrasonic sensors
+Echo1 = 26
+Trigger1 = 21
+Echo2 = 2
+Trigger2 = 3
+Echo3 = 9
+Trigger3 = 10
+
+#Turn motors off
+GPIO.setup(Motor1A, GPIO.OUT)
+GPIO.setup(Motor1B, GPIO.OUT)
+GPIO.setup(Motor2A, GPIO.OUT)
+GPIO.setup(Motor2B, GPIO.OUT)
+
+# PWM at 100 Hz
+pwm_A_IA = GPIO.PWM(Motor1A, 100)
+pwm_A_IB = GPIO.PWM(Motor1B, 100)
+pwm_B_IA = GPIO.PWM(Motor2A, 100)
+pwm_B_IB = GPIO.PWM(Motor2B, 100)
+pwm_A_IA.start(0)
+pwm_A_IB.start(0)
+pwm_B_IA.start(0)
+pwm_B_IB.start(0)
+
+
+def backward():
+    GPIO.output(Motor1A, GPIO.HIGH)
+    GPIO.output(Motor1B, GPIO.LOW)
+    GPIO.output(Motor2A, GPIO.HIGH)
+    GPIO.output(Motor2B, GPIO.LOW)
+
+def stop():
+    GPIO.output(Motor1A, GPIO.LOW)
+    GPIO.output(Motor1B, GPIO.LOW)
+    GPIO.output(Motor2A, GPIO.LOW)
+    GPIO.output(Motor2B, GPIO.LOW)
+
+def right():
+    GPIO.output(Motor1A, GPIO.HIGH)
+    GPIO.output(Motor1B, GPIO.LOW)
+    GPIO.output(Motor2A, GPIO.LOW)
+    GPIO.output(Motor2B, GPIO.HIGH)
+
+def left():
+    GPIO.output(Motor1A, GPIO.LOW)
+    GPIO.output(Motor1B, GPIO.HIGH)
+    GPIO.output(Motor2A, GPIO.HIGH)
+    GPIO.output(Motor2B, GPIO.LOW)
+
+def forward():
+    GPIO.output(Motor1A, GPIO.LOW)
+    GPIO.output(Motor1B, GPIO.HIGH)
+    GPIO.output(Motor2A, GPIO.LOW)
+    GPIO.output(Motor2B, GPIO.HIGH)
+
+def sonar (GPIO_Trigger,GPIO_ECHO):
+    #Define variables
+    start=0
+    stop=0
+    distance = 1000
+
+    #Set GPIO pins
+    GPIO.setup(GPIO_Trigger, GPIO.OUT)
+
+    GPIO.setup(GPIO_ECHO, GPIO.IN)
+
+    #Turn off the trigger
+    GPIO.output(GPIO_Trigger, False)
+    time.sleep(0.01)
+
+    while distance > 5:
+        #Ultrasonic sensor sends a signal
+        GPIO.output(GPIO_Trigger, True)
+        time.sleep(0.00001)
+        GPIO.output(GPIO_Trigger, False)
+        #Variable for current time
+        begin = time.time()
+        #Measuring the start - when the signal is sent
+        while GPIO.input(GPIO_ECHO) == 0 and time.time()<begin+0.05:
+            start = time.time()
+        #Measuring the stop - when the echo from the signal is received
+        while GPIO.input(GPIO_ECHO) == 1 and time.time()<start+0.1:
+            stop = time.time()
+        #Calculate the distance
+        elapsed = stop - start
+        distance = elapsed * 34000/2
+        print("Distance : %.1f" % distance)
+        return distance
+
+#Function to manually type inputs to control the robot
+def manual_drive():
+    while(1):
+        control = input()
+        if "forward" in control:
+            forward()
+            time.sleep(0.5)
+            stop()
+        elif "backward" in control:
+            backward()
+            time.sleep(0.5)
+            stop()
+        elif "left" in control:
+            left()
+            time.sleep(0.5)
+            stop()
+        elif "right" in control:
+            right()
+            time.sleep(0.5)
+            stop()
+        elif "leave" in control:
+            break
+
+#Function to test the ultrasonic sensors
+def sonar_test():
+    for i in range(1,100):
+        distance = sonar(Trigger1, Echo1)
+    print(distance)
+    time.sleep(2)
+    for i in range(1,100):
+        distance = sonar(Trigger2, Echo2)
+    print(distance)
+    time.sleep(2)
+    for i in range(1,100):
+        distance = sonar(Trigger3, Echo3)
+    print(distance)
+
+#Set up picamera desktop stream
+app = Flask(__name__)
+
+picam2 = Picamera2()
+picam2.configure(picam2.create_preview_configuration(main={"format":"BGR888", "size": (640, 480)}))
+picam2.start()
+
+FRAME_WIDTH = 640
+CENTER_X = FRAME_WIDTH // 2
+
+def track_object(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_red1 = np.array([0,100,50])
+    upper_red1 = np.array([10,255,255])
+    lower_red2 = np.array([160, 100, 50])
+    upper_red2 = np.array([179, 255, 255])
+
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask = cv2.bitwise_or(mask1, mask2)
+
+    mask = cv2.erode(mask, None, iterations=2)
+    mask = cv2.dilate(mask, None, iterations=2)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        M = cv2.moments(largest)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            offset = cx - CENTER_X
+            if abs(offset) < 30:
+                position = "Centered"
+            elif offset < 0:
+                position = "Left"
+            else:
+                position = "Right"
+
+            cv2.drawContours(frame, [largest], -1, (0, 255, 0), 2)
+            cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+            cv2.putText(frame, f"Offset: {offset}({position})", (10, 30), 
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    return frame
+        
+def generate_frames():
+    while True:
+        frame = picam2.capture_array()
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        frame = track_object(frame)
+        ret, buffer = cv2.imencode('.jpg', frame)
+        jpg_frame = buffer.tobytes()
+        yield (b'--frame\r\n'
+        b'Content-Type: image/jpeg\r\n'
+        b'Content-Length: ' + f"{len(jpg_frame)}".encode() + b'\r\n\r\n' + jpg_frame + b'\r\n')
+
+@app.route('/')
+def index():
+        return render_template_string('''
+        <html>
+            <head><title>Red Ball Tracking Stream</title></head>
+            <body>
+                <h2>Live Tracking</h2>
+                <img src="/video_feed">
+            </body>
+        </html>
+        ''')
+    
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), 
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+def segment_color(frame):
+    hsv_roi = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask_1 = cv2.inRange(hsv_roi, np.array([160, 160, 10]), np.array([190, 255, 255]))
+    ycr_roi = cv2.cvtColor(frame,cv2.COLOR_BGR2YCrCb)
+    mask_2 = cv2.inRange(ycr_roi, np.array((0.,165.,0.)), np.array((255.,255.,255.)))
+
+    mask = mask_1 | mask_2
+    kern_dilate = np.ones((8,8),np.uint8)
+    kern_erode  = np.ones((3,3),np.uint8)
+    mask = cv2.erode(mask, kern_erode)      # Eroding
+    mask = cv2.dilate(mask, kern_dilate)     # Dilating
+    return mask
+
+def find_blob(blob):
+    largest_contour = 0
+    cont_index = 0
+    contours, hierarchy = cv2.findContours(blob, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    for idx, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
+        if area > largest_contour:
+            largest_contour = area
+            cont_index = idx
+
+    r = (0, 0, 2, 2)
+    if len(contours) > 0:
+        r = cv2.boundingRect(contours[cont_index])
+    
+    return r, largest_contour
+
+def target_hist(frame):
+    hsv_img = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv_img], [0], None, [50], [0, 255])
+    return hist
+
+camera = Picamera2()
+camera_config = camera.create_video_configuration(main={"size": (160, 120)})
+camera.configure(camera_config)
+camera.start()
+
+time.sleep(0.1)
+
+while True:
+    frame = camera.capture_array()
+    frame=cv2.flip(frame,1)
+    global centre_x
+    global centre_y
+    centre_x=0.
+    centre_y=0.
+    hsv1 = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask_red=segment_color(frame)  
+    loct,area=find_blob(mask_red)
+    x,y,w,h=loct
+    
+    #distance coming from front ultrasonic sensor
+    distanceC = sonar(Trigger3, Echo3)
+    #distance coming from right ultrasonic sensor
+    distanceR = sonar(Trigger1, Echo1)
+    #distance coming from left ultrasonic sensor
+    distanceL = sonar(Trigger2, Echo2)
+            
+    if (w * h) < 10:
+        found = 0
+        print("Not Found!")
+    else:
+        found = 1
+        print("Found!")
+        simg2 = cv2.rectangle(frame, (x, y), (x + w, y + h), 255, 2)
+        centre_x = x + ((w) / 2)
+        centre_y = y + ((h) / 2)
+        cv2.circle(frame, (int(centre_x), int(centre_y)), 3, (0, 110, 255), -1)
+        centre_x -= 80
+        centre_y = 6 - centre_y
+        print(centre_x, centre_y)
+        initial=400
+        flag=0        
+        if(found==0):
+            if flag==0:
+                rightturn()
+                time.sleep(0.05)
+            else:
+                leftturn()
+                time.sleep(0.05)
+            stop()
+            time.sleep(0.0125)
+    
+        elif(found==1):
+            if(area<initial):
+                if(distanceC<10):
+                        if distanceR>=8:
+                            right()
+                            time.sleep(0.00625)
+                            stop()
+                            time.sleep(0.0125)
+                            forward()
+                            time.sleep(0.00625)
+                            stop()
+                            time.sleep(0.0125)
+                            #while found==0:
+                            left()
+                            time.sleep(0.00625)
+                        elif distanceL>=8:
+                            left()
+                            time.sleep(0.00625)
+                            stop()
+                            time.sleep(0.0125)
+                            forward()
+                            time.sleep(0.00625)
+                            stop()
+                            time.sleep(0.0125)
+                            right()
+                            time.sleep(0.00625)
+                            stop()
+                            time.sleep(0.0125)
+                        else:
+                            stop()
+                            time.sleep(0.01)
+                else:
+                        forward()
+                        time.sleep(0.00625)
+            elif(area>=initial):
+                initial2=6700
+                if(area<initial2):
+                        if(distanceC>10):
+                            if(centre_x<=-20 or centre_x>=20):
+                                    if(centre_x<0):
+                                        flag=0
+                                        right()
+                                        time.sleep(0.025)
+                                    elif(centre_x>0):
+                                        flag=1
+                                        left()
+                                        time.sleep(0.025)
+                            forward()
+                            time.sleep(0.00003125)
+                            stop()
+                            time.sleep(0.00625)
+                        else:
+                            stop()
+                            time.sleep(0.01)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+GPIO.cleanup()
